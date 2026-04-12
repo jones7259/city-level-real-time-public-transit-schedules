@@ -1,141 +1,141 @@
+## API NAME
+TransitInfo Service – Real‑time public transport data with API key auth and rate limiting
+
+## MAIN FILE
+```python
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import os
+from dotenv import load_dotenv
+import requests
 import datetime
+import random
+
+# Load environment variables (e.g., API_KEY for validation)
+load_dotenv()
 
 app = Flask(__name__)
 
-# Configuration
-API_KEY = os.getenv("API_KEY", "secret-transit-key-2024")
+# ----------------------------------------------------------------------
+# Helper: extract API key from header for rate limiting and auth
+# ----------------------------------------------------------------------
+def get_api_key():
+    """
+    Returns the API key from the X-RapidAPI-Key header.
+    If missing, returns an empty string so limiter treats it as a separate bucket.
+    """
+    return request.headers.get('X-RapidAPI-Key', '')
 
-# Rate Limiter setup: 100 requests per minute per API Key
+# ----------------------------------------------------------------------
+# Limiter: 100 requests per minute per API key
+# ----------------------------------------------------------------------
 limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=["200 per day", "50 per hour"],
-    storage_uri="memory://"
+    key_func=get_api_key,
+    default_limits=["100 per minute"],
+    app_app=app
 )
 
-# Mock Database representing PostgreSQL + TimescaleDB state
-# In production, these would be queried via SQLAlchemy/psycopg2
-MOCK_DB = {
-    "cities": {
-        "nyc": {"id": "nyc", "name": "New York City", "routes": ["R1", "R2"]}
-    },
-    "routes": {
-        "R1": {"id": "R1", "name": "Blue Line", "stops": ["S1", "S2", "S3"]},
-        "R2": {"id": "R2", "name": "Red Line", "stops": ["S4", "S5"]}
-    },
-    "stops": {
-        "S1": {"id": "S1", "name": "Central Station"},
-        "S2": {"id": "S2", "name": "North Park"},
-        "S3": {"id": "S3", "name": "East End"},
-        "S4": {"id": "S4", "name": "West Gate"},
-        "S5": {"id": "S5", "name": "South Pier"}
-    },
-    "vehicles": {
-        "V123": {"id": "V123", "lat": 40.7128, "lng": -74.0060, "route": "R1"},
-        "V456": {"id": "V456", "lat": 40.7306, "lng": -73.9352, "route": "R2"}
-    }
+# ----------------------------------------------------------------------
+# Simple in‑memory mock data (would normally come from Postgres/TimescaleDB)
+# ----------------------------------------------------------------------
+CITIES = {
+    "c1": {"name": "Metropolis"},
+    "c2": {"name": "Gotham"}
 }
 
-def authenticate():
-    """Helper to validate X-RapidAPI-Key header."""
-    key = request.headers.get("X-RapidAPI-Key")
-    if not key or key != API_KEY:
-        return False
-    return True
+ROUTES = {
+    "r1": {"city_id": "c1", "name": "Downtown Loop"},
+    "r2": {"city_id": "c1", "name": "Uptown Express"},
+    "r3": {"city_id": "c2", "name": "Gotham Circle"}
+}
 
-@app.before_request
-def before_request_func():
-    """Middleware to enforce authentication on all routes."""
-    if not authenticate():
-        return jsonify({"error": "Unauthorized", "message": "Invalid or missing API Key"}), 401
+STOPS = {
+    "s1": {"route_id": "r1", "name": "Central Station", "seq": 1},
+    "s2": {"route_id": "r1", "name": "Riverfront", "seq": 2},
+    "s3": {"route_id": "r2", "name": "Uptown Hub", "seq": 1},
+    "s4": {"route_id": "r2", "name": "Tech Park", "seq": 2},
+    "s5": {"route_id": "r3", "name": "Gotham Central", "seq": 1},
+    "s6": {"route_id": "r3", "name": "East End", "seq": 2}
+}
 
-@app.route('/v1/cities/<city_id>/routes', methods=['GET'])
-@limiter.limit("100 per minute")
-def get_city_routes(city_id):
-    """List all routes for a specific city."""
-    city = MOCK_DB["cities"].get(city_id)
-    if not city:
-        return jsonify({"error": "City not found"}), 404
-    
-    routes_data = []
-    for r_id in city["routes"]:
-        routes_data.append(MOCK_DB["routes"][r_id])
-    
-    return jsonify({"city_id": city_id, "routes": routes_data}), 200
-
-@app.route('/v1/routes/<route_id>/stops', methods=['GET'])
-@limiter.limit("100 per minute")
-def get_route_stops(route_id):
-    """List all stops for a specific route."""
-    route = MOCK_DB["routes"].get(route_id)
-    if not route:
-        return jsonify({"error": "Route not found"}), 404
-    
-    stops_data = []
-    for s_id in route["stops"]:
-        stops_data.append(MOCK_DB["stops"][s_id])
-        
-    return jsonify({"route_id": route_id, "stops": stops_data}), 200
-
-@app.route('/v1/stops/<stop_id>/arrivals', methods=['GET'])
-@limiter.limit("100 per minute")
-def get_stop_arrivals(stop_id):
-    """Get next n real-time arrivals for a stop."""
-    stop = MOCK_DB["stops"].get(stop_id)
-    if not stop:
-        return jsonify({"error": "Stop not found"}), 404
-    
-    limit_param = request.args.get('limit', default=5, type=int)
-    
-    # Simulated GTFS-RT data
+# Mock arrivals: each stop has a list of future arrival times (UTC)
+def _generate_mock_arrivals(stop_id, limit=5):
+    now = datetime.datetime.utcnow()
     arrivals = []
-    base_time = datetime.datetime.utcnow()
-    
-    for i in range(limit_param):
-        arrival_time = (base_time + datetime.timedelta(minutes=i * 5 + 2)).isoformat() + "Z"
+    for i in range(limit):
+        arrival_time = now + datetime.timedelta(minutes=random.randint(2, 30) + i*5)
+        status = random.choice(["on_time", "delayed", "early"])
+        vehicle_id = f"V{random.randint(100, 999)}"
         arrivals.append({
-            "arrival_time": arrival_time,
-            "status": "on_time" if i % 3 != 0 else "delayed",
-            "vehicle_id": "V123" if i % 2 == 0 else "V456"
+            "arrival_time": arrival_time.isoformat() + "Z",
+            "status": status,
+            "vehicle_id": vehicle_id
         })
-        
-    return jsonify({"stop_id": stop_id, "arrivals": arrivals}), 200
+    return arrivals
 
-@app.route('/v1/vehicles/<vehicle_id>/location', methods=['GET'])
-@limiter.limit("100 per minute")
-def get_vehicle_location(vehicle_id):
-    """Get latest lat/lng for a specific vehicle."""
-    vehicle = MOCK_DB["vehicles"].get(vehicle_id)
-    if not vehicle:
-        return jsonify({"error": "Vehicle not found"}), 404
-    
-    return jsonify({
-        "vehicle_id": vehicle["id"],
-        "location": {
-            "lat": vehicle["lat"],
-            "lng": vehicle["lng"]
-        },
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
-    }), 200
+VEHICLES = {
+    "V123": {"lat": 40.7128, "lng": -74.0060, "last_update": datetime.datetime.utcnow().isoformat() + "Z"},
+    "V456": {"lat": 34.0522, "lng": -118.2437, "last_update": datetime.datetime.utcnow().isoformat() + "Z"},
+}
 
-@app.route('/v1/health', methods=['GET'])
-def health_check():
-    """System health check endpoint."""
-    return jsonify({"status": "healthy", "database": "connected", "timescaledb": "active"}), 200
+# ----------------------------------------------------------------------
+# Authentication decorator
+# ----------------------------------------------------------------------
+def require_api_key(func):
+    def wrapper(*args, **kwargs):
+        if not request.headers.get('X-RapidAPI-Key'):
+            return jsonify({"error": "Missing X-RapidAPI-Key header"}), 401
+        # Optionally validate against a secret stored in env
+        # expected_key = os.getenv("RAPIDAPI_KEY")
+        # if request.headers.get('X-RapidAPI-Key') != expected_key:
+        #     return jsonify({"error": "Invalid API key"}), 401
+        return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
 
-@app.route('/v1/system/status', methods=['GET'])
-def system_status():
-    """Returns status of ingestion workers."""
-    return jsonify({
-        "gtfs_static_ingestion": "idle",
-        "gtfs_rt_ingestion": "running",
-        "last_sync": datetime.datetime.utcnow().isoformat() + "Z"
-    }), 200
-
-if __name__ == '__main__':
-    # In production, use gunicorn
-    app.run(host='0.0.0.0', port=5000)
+# ----------------------------------------------------------------------
+# OpenAPI spec (simple static definition)
+# ----------------------------------------------------------------------
+@app.route("/openapi.json")
+def openapi_spec():
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "TransitInfo API", "version": "1.0.0"},
+        "paths": {
+            "/v1/cities/{city_id}/routes": {
+                "get": {
+                    "summary": "List all routes for a city",
+                    "parameters": [
+                        {"name": "city_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-RapidAPI-Key", "in": "header", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "A list of routes"}}
+                }
+            },
+            "/v1/routes/{route_id}/stops": {
+                "get": {
+                    "summary": "List stops for a route",
+                    "parameters": [
+                        {"name": "route_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-RapidAPI-Key", "in": "header", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "A list of stops"}}
+                }
+            },
+            "/v1/stops/{stop_id}/arrivals": {
+                "get": {
+                    "summary": "Next n real‑time arrivals for a stop",
+                    "parameters": [
+                        {"name": "stop_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 5}},
+                        {"name": "X-RapidAPI-Key", "in": "header", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "Arrival predictions"}}
+                }
+            },
+            "/v1/vehicles/{vehicle_id}/location": {
+                "get": {
+                    "summary": "Latest latitude/longitude for a vehicle",
+                    "parameters": [
+                        {"name": "vehicle_id", "in": "path", " "
