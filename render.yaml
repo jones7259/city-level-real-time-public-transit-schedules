@@ -3,6 +3,7 @@ services:
   name: city-level-real-time-public-transit-schedules
   env: python
   plan: free
+  region: oregon
   buildCommand: pip install -r requirements.txt
   startCommand: gunicorn main:app
   autoDeploy: true
